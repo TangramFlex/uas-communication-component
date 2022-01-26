@@ -1,41 +1,86 @@
+// This file is for demonstrating a Tangram Pro generated LMCP component software 
+// interface communciating with OpenAMASE. OpenAMASE will display the status
+// of a simulated UAV (ID=600) in real-time.
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <errno.h>
-#include <stdio.h>
-#include <string.h>
 #include <unistd.h>
 #include <signal.h>
-#include <cstdint>
-#include <string>
-#include <vector>
+#include <stdio.h>
+#include <string.h>
 
 // These are the header files for the messages needed from the LMCP generic CSI
 #include "AirVehicleState.hpp"
 #include "AirVehicleConfiguration.hpp"
 
-// These headers are for the serializer to use (LMCP format) and the factory
-// object that provides new objects based on type
+// These headers are for the LMCP serializer and the factory object that
+// provides new objects based on type
 #include "LMCPSerializer.h"
-#include "DerivedEntityFactory.hpp"
+#include "afrl_cmasi_DerivedEntityFactory.hpp"
+afrl::cmasi::DerivedEntityFactory *lmcpEntityFactory;
+tangram::serializers::LMCPSerializer *lmcpSerializer;
 
+// Some constants for the LMCP TCP wrapper. To send LMCP to OpenAMASE via TCP
+// stream socket, there's an additional wrapper required around the serialized
+// LMCP message.
 #define HEADER_SIZE 8
 #define CHECKSUM_SIZE 4
 
-/* Sends bytes contained in the buffer provided. Does not return until all bytes
- * are sent or an error occurs.
- * \param data The buffer of bytes to be sent.
- * \param numBytes The number of bytes to be sent.
- * \param fd The file descriptor to use for the send.
- * \returns The number of bytes sent on success or -1 on error.
- */
-static int sendBytes(const unsigned char *data, uint32_t numBytes, int fd) {
+// The file descriptor for the TCP socket to OpenAMASE
+static int openAMASESocket = -1;
 
+// Performs an on-demand connect to OpenAMASE via TCP stream socket
+static int connectToOpenAMASE() {
+    
+    // Talking to OpenAMASE is done using a regular old TCP stream socket
+    openAMASESocket = socket(AF_INET, SOCK_STREAM, 0);
+    if (openAMASESocket == -1) {
+        fprintf(stderr, "Failed to create socket (%d) (%s).\n", openAMASESocket,
+            strerror(errno));
+        return -1;
+    }
+    signal(SIGPIPE, SIG_IGN);
+
+    // OpenAMASE sets up a server socket on 0.0.0.0:5555
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(5555);
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr.s_addr);
+    if (connect(openAMASESocket, (const struct sockaddr *) &addr, sizeof(addr))
+        != 0) {
+        fprintf(stderr, "Failed to connect socket (%s).\n", strerror(errno));
+        close(openAMASESocket);
+        openAMASESocket = -1;
+        return -1;
+    }
+    fprintf(stderr, "Connected to OpenAMASE.\n");
+
+    return 0;
+}
+
+// Performs a blocking write of the given data buffer to the OpenAMASE TCP
+// stream socket.
+static int sendBytesToOpenAMASE(const unsigned char *data, uint32_t numBytes) {
+
+    // This is a connect-on-demand setup so if the connection to OpenAMASE
+    // hasn't already been made, do that now
+    if (openAMASESocket == -1) {
+        if (connectToOpenAMASE() != 0) {
+            return -1;
+        }
+    }
+
+    // Socket send loop, doesn't exit until all bytes given are sent or an
+    // error is detected
     uint32_t bytesSent = 0;
     while(bytesSent != numBytes) {
-        int status = write(fd, &data[bytesSent], numBytes - bytesSent);
+        int status = write(openAMASESocket, &data[bytesSent], numBytes -
+            bytesSent);
         if (status <= 0) {
+            close(openAMASESocket);
+            openAMASESocket = -1;
             return -1;
         } else {
             bytesSent += status;
@@ -45,17 +90,15 @@ static int sendBytes(const unsigned char *data, uint32_t numBytes, int fd) {
     return numBytes;
 }
 
-/* Sends a serialized LMCP message wrapped to be compatible with the needs of
- * the OpenAMASE simulator.
- * \param data The serialized data to be sent.
- * \param messageSize The size of the serialized data in bytes.
- * \param messageName The name of the message (fully qualified) being sent.
- * \param fd The file descriptor to use for the send.
- * \returns The number of bytes sent on success or -1 on error.
- */
-static int sendMessage(const unsigned char *data, uint32_t messageSize,
-    const char *messageName, int fd) {
-
+// Sends a complete LMCP message to OpenAMASE property wrapping it to be
+// compatible with the TCP server setup of OpenAMASE. It will perform the
+// initial connection if needed and send the initial AirVehicleConfiguration
+// message as well.
+static int sendMessageToOpenAMASE(const unsigned char *data, uint32_t messageSize,
+    const char *messageName) {
+        
+    // this code is a fairly direct port of Java code found in the OpenUxAS
+    // LMCP Java library
     std::string attributes = messageName;
     attributes += "$lmcp|";
     attributes += messageName;
@@ -93,49 +136,23 @@ static int sendMessage(const unsigned char *data, uint32_t messageSize,
         std::back_inserter(completeMessage));
     std::copy(footer.begin(), footer.end(), std::back_inserter(completeMessage));
 
-    fprintf(stderr, "Sending message of %lu byets.\n", completeMessage.size());
-    return sendBytes(&completeMessage[0], completeMessage.size(), fd);
+    int status = sendBytesToOpenAMASE(&completeMessage[0], completeMessage.size());
+    if (status == 0) {
+        fprintf(stderr, "Failed to send message %s to OpenAMASE!\n", messageName); 
+    }
+    return status;
 }
 
-/* This is the entry point for a program that creates and sends an LMCP
- * AirConfigurationMessage followed by a continous stream of LMCP
- * AirVehicleState messages. The result should be that a "Tangram UAV"
- * UAS is shown on the OpenAMASE display and its position updated at a 1Hz
- * rate.
- */
-int main(int argc, char *argv[]) {
+// Construct and build and AirVehicleConfiguration message suitable for our
+// scenario, then send it to OpenAMASE.
 
-    // Talking to OpenAMASE is done using a regular old TCP stream socket
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd == -1) {
-        fprintf(stderr, "Failed to create socket (%d) (%s).\n", fd,
-            strerror(errno));
-        return 1;
-    }
-    signal(SIGPIPE, SIG_IGN);
+static int sendAirVehicleConfiguration() {
 
-    // OpenAMASE sets up a server socket on 0.0.0.0:5555
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(5555);
-    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr.s_addr);
-    if (connect(fd, (const struct sockaddr *) &addr, sizeof(addr)) != 0) {
-        fprintf(stderr, "Failed to connect socket (%s).\n", strerror(errno));
-        close(fd);
-        return 1;
-    }
-    fprintf(stderr, "Connected to server.\n");
-
-    // To serialize messages, we need an LMCP CSI entity factory and serializer
-    tangram::genericapi::DerivedEntityFactory entityFactory;
-    tangram::serializers::LMCPSerializer lmcpSerializer(&entityFactory);
-
-    // Create and populate an AirVehicleConfiguration message, which tells
-    // OpenAMASE about our platform. If this message is successfully received
-    // and processed by OpenAMASE the "Tangram UAV" platform will appear on the
-    // right hand side of the screen.
-    fprintf(stderr, "Starting AirVehicleConfiguration\n");
+    // Note that the AirVehicleConfiguration ID is set to 600. This is what 
+    // the new UAV will be seen as in the OpenAMASE application. Also note 
+    // that the AirVehicleState messages to follow must have that same ID 
+    // value set so that they can be matched up to the configuration message 
+    // for that vehicle.
     afrl::cmasi::AirVehicleConfiguration avc;
     avc.setID(600, false);
     avc.setAffiliation("Tangram Flex", false);
@@ -145,7 +162,7 @@ int main(int argc, char *argv[]) {
     avc.setNominalAltitudeType("MSL");
     avc.setMinimumSpeed(18.044F, false);
     avc.setMaximumSpeed(33.223f, false);
-    avc.setMinimumAltitude(0.0f, false);
+    avc.setMinimumAltitude(0.0f);
     avc.setMinAltitudeType("AGL", false);
     avc.setMaximumAltitude(100000.0f, false);
     avc.setMaxAltitudeType("MSL", false);
@@ -158,24 +175,47 @@ int main(int argc, char *argv[]) {
     avc.addToAvailableTurnTypes(afrl::cmasi::TurnType::EnumItem::FlyOver,
         false);
 
-    // Serialize and send the AirVehicleConfiguration message
-    fprintf(stderr, "Serializing AirVehicleConfiguration\n");
+    printf("Serializing AirVehicleConfiguration\n");
     std::vector<uint8_t> avcBytes;
-    if (!lmcpSerializer.serialize(avc, avcBytes)) {
-        fprintf(stderr, "Failed to serialize message.\n");
+    if (!lmcpSerializer->serialize(avc, avcBytes)) {
+        fprintf(stderr, "Failed to serialize LMCP message.\n");
         return 1;
     }
-    fprintf(stderr, "Sending AirVehicleConfiguration (%lu bytes)\n",
+    printf("Sending AirVehicleConfiguration (%lu bytes)\n",
         avcBytes.size());
-    if (sendMessage(&avcBytes[0], avcBytes.size(),
-        "afrl.cmasi.AirVehicleConfiguration", fd) == -1) {
+    if (sendMessageToOpenAMASE(&avcBytes[0], avcBytes.size(),
+        "afrl.cmasi.AirVehicleConfiguration") == -1) {
         fprintf(stderr, "ERROR SENDING AirVehicleConfiguration (%s)\n",
             strerror(errno));
     }
     printf("Sent AirVehicleConfiguration message.\n");
 
-    // Wait 3 seconds
-    sleep(3);
+    return 0;
+}
+
+// Initializes the needed serializers. We have to use an LMCP serializer to send
+// messages to OpenAMASE
+static int initializeSerializer() {
+    lmcpEntityFactory = new afrl::cmasi::DerivedEntityFactory();
+    lmcpSerializer = new tangram::serializers::LMCPSerializer(lmcpEntityFactory);
+
+    return 0;
+}
+
+// Cleans up previously created serializers
+static void destroySerializer() {
+    delete lmcpSerializer;
+    delete lmcpEntityFactory;
+}
+
+int main(int argc, char *argv[]) {
+
+    // Setup the serializers needed
+    initializeSerializer();
+    printf("Initialized LMCP serializer.\n");
+
+    // Send AirVehicleConfiguration to OpenAMASE
+    sendAirVehicleConfiguration();
 
     // Setup some starter values for the AirVehicleState messages that will be
     // streamed to OpenAMASE
@@ -219,14 +259,14 @@ int main(int argc, char *argv[]) {
 
         fprintf(stderr, "Serializing AirVehicleState\n");
         std::vector<uint8_t> avsBytes;
-        if (!lmcpSerializer.serialize(avs, avsBytes)) {
+        if (!lmcpSerializer->serialize(avs, avsBytes)) {
             fprintf(stderr, "Failed to serialize message.\n");
             return 1;
         }
         fprintf(stderr, "Sending AirVehicleState (%lu bytes)\n",
             avsBytes.size());
-        if (sendMessage(&avsBytes[0], avsBytes.size(),
-            "afrl.cmasi.AirVehicleState", fd) == -1) {
+        if (sendMessageToOpenAMASE(&avsBytes[0], avsBytes.size(),
+            "afrl.cmasi.AirVehicleState") == -1) {
             fprintf(stderr, "ERROR SENDING AirVehicleState (%s)\n",
                 strerror(errno));
         }
@@ -234,13 +274,13 @@ int main(int argc, char *argv[]) {
 
         sleep(1);
 
-        // bump the latitude, altitude and energy; latitude depends on where
+        // Bump the latitude, altitude and energy; latitude depends on where
         // we are, it may go up or down
         longitude += 0.0021223 * multiplier;
         altitude += 1.2;
         energy -= 0.15;
 
-        // every 30 updates, swap the direction of travel
+        // Every 30 updates, swap the direction of travel
         count++;
         if (count == 30) {
             count = 0;
@@ -253,7 +293,11 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    close(fd);
+    // Cleanup before leaving
+    if (openAMASESocket != -1) {
+        close(openAMASESocket);
+    }
+    destroySerializer();
 
     return 0;
 }
