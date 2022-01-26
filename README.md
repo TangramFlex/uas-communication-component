@@ -9,7 +9,7 @@ _This is a resource for Tangram Pro™ Tutorials which can be found [here](https
 # Requirements
 
 - A Linux [**Ubuntu 20.04 LTS**](https://ubuntu.com/download/desktop) machine (or VM) is required to run this application.
-- The [OpenAMSE](https://github.com/afrl-rq/OpenAMASE) Java program must be installed.
+- The [OpenAMASE](https://github.com/afrl-rq/OpenAMASE) Java program must be installed.
 
 ## Dependencies
 
