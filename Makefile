@@ -6,19 +6,23 @@ CXXFLAGS        := -Werror -Wall -Wmissing-declarations -Wpointer-arith \
 	                 -pedantic-errors -fstack-protector-all -D_FORTIFY_SOURCE=2 \
 	                 -fPIC -std=c++11 -pthread -O0 -g
 
-LMCP_CSI_DIR    ?= /Users/fredgillenwater/Downloads/code-gen-3-3
-GENERICAPI_DIR  ?= /Users/fredgillenwater/Downloads/code-gen-3-3/genericapi-cpp
+LMCP_CSI_DIR    ?= ./code-gen-3
+
+GENERICAPI_DIR   = $(LMCP_CSI_DIR)/pkg_deps/genericapi
+TRANSPORTS_DIR   = $(GENERICAPI_DIR)/pkg_deps/transports-cpp
 
 INCLUDES         = -I$(LMCP_CSI_DIR)/include -I$(GENERICAPI_DIR)/include \
-	               -I$(GENERICAPI_DIR)/serializers/include \
-	               -I$(GENERICAPI_DIR)/serializers/serializer_lmcp/include \
-	               -I$(TRANSPORT_DIR)/include
+	            	 -I$(GENERICAPI_DIR)/serializers/include \
+	                 -I$(GENERICAPI_DIR)/serializers/serializer_lmcp/include \
+	                 -I$(TRANSPORT_DIR)/include
 
 LIBPATHS         = -L$(LMCP_CSI_DIR)/build/libs -L$(GENERICAPI_DIR)/build/libs \
-	               -L$(GENERICAPI_DIR)/serializers/serializer_lmcp/build/libs
+	                 -L$(GENERICAPI_DIR)/serializers/serializer_lmcp/build/libs
 
-LIBS             = -l:libtangramgeneric.a -l:libtangramgenericapi.a \
-	               -l:libtangramlmcpserializer.a
+LIBS             = $(GENERICAPI_DIR)/serializers/serializer_lmcp/build/libs/libtangramlmcpserializer.a \
+			 $(LMCP_CSI_DIR)/build/libs/libtangramgeneric.a \
+			 $(GENERICAPI_DIR)/build/libs/libtangramgenericapi.a
+
 
 all: lmcp_sender
 
@@ -27,4 +31,3 @@ lmcp_sender: lmcp_sender.cpp
 
 clean:
 	@rm -f lmcp_sender
-
