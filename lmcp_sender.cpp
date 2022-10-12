@@ -11,8 +11,8 @@
 #include <string.h>
 
 // These are the header files for the messages needed from the LMCP generic CSI
-#include "AirVehicleState.hpp"
-#include "AirVehicleConfiguration.hpp"
+#include "afrl/cmasi/AirVehicleState.hpp"
+#include "afrl/cmasi/AirVehicleConfiguration.hpp"
 
 // These headers are for the LMCP serializer and the factory object that
 // provides new objects based on type
