@@ -6,7 +6,7 @@ CXXFLAGS        := -Werror -Wall -Wmissing-declarations -Wpointer-arith \
 	                 -pedantic-errors -fstack-protector-all -D_FORTIFY_SOURCE=2 \
 	                 -fPIC -std=c++11 -pthread -O0 -g
 
-LMCP_CSI_DIR    ?= ./code-gen-3
+LMCP_CSI_DIR    ?= ./code-gen
 
 GENERICAPI_DIR   = $(LMCP_CSI_DIR)/pkg_deps/genericapi
 TRANSPORTS_DIR   = $(GENERICAPI_DIR)/pkg_deps/transports-cpp
