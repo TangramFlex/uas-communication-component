@@ -16,7 +16,7 @@
 
 // These headers are for the LMCP serializer and the factory object that
 // provides new objects based on type
-#include "LMCPSerializer.h"
+#include "LMCPSerializer.hpp"
 #include "afrl_cmasi_DerivedEntityFactory.hpp"
 afrl::cmasi::DerivedEntityFactory *lmcpEntityFactory;
 tangram::serializers::LMCPSerializer *lmcpSerializer;
